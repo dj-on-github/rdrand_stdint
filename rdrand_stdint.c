@@ -151,6 +151,23 @@ int rdseed_check_support()
 	return 0;
 }
 
+int check_aesni()
+{
+    CPUIDinfo info;
+    get_cpuid(&info,1,0);
+    
+    if ((info.ECX & 0x02000000)==0x02000000) return 1;
+    return 0;   
+}
+
+int aesni_check_support()
+{
+    if ((check_is_intel()==1) || (check_is_amd()==1)){
+        if (check_aesni()==1) return 1;
+    }
+    return 0;
+}
+
 /***************************************************/
 /* Gathers 16 bits of entropy through RDRAND       */
 /*   The 16 bit result is zero extended to 32 bits */
@@ -625,4 +642,78 @@ unsigned int i;
         dest=&(dest[1]);
     }
     return 1; 
+}
+
+
+/****************************************************************/
+/* Uses RdRand to acquire a block of random bytes               */
+/*   Uses RdRand64 to optimize speed                            */
+/*   Writes that entropy to (unsigned int *)dest[0+].           */
+/*   Internally will retry up to 10 times un underflow.         */
+/*   Returns 1 on success, 0 on failure                         */
+/****************************************************************/
+
+int rdrand_get_bytes_step(unsigned int n, unsigned char *dest)
+{
+unsigned char *start;
+unsigned char *residualstart;
+uint64_t *blockstart;
+unsigned int count;
+unsigned int residual;
+unsigned int startlen;
+uint64_t i;
+uint64_t temprand;
+unsigned int length;
+
+    /* Compute the address of the first 64 bit aligned block in the destination buffer */
+    start = dest;
+    if (((uint64_t)start % (uint64_t)8) == 0)
+    {
+        blockstart = (uint64_t *)start;
+        count = n;
+        startlen = 0;
+    }
+    else
+    {
+        blockstart = (uint64_t *)(((uint64_t)start & ~(uint64_t)7)+(uint64_t)8);
+        count = n - (8 - (unsigned int)((uint64_t)start % 8));
+        startlen = (unsigned int)((uint64_t)blockstart - (uint64_t)start);
+    }
+
+    /* Compute the number of 64 bit blocks and the remaining number of bytes */
+    residual = count % 8;
+    length = count >> 3;
+    if (residual != 0)
+    {
+        residualstart = (unsigned char *)(blockstart + length);
+    }
+
+    /* Get a temporary random number for use in the residuals. Failout if retry fails */
+    if (startlen > 0)
+    {
+        if (rdrand_get_n_uint64_retry(1, 10, (void *)&temprand) == 0) return 0;
+    }
+
+    /* populate the starting misaligned block */
+    for (i = 0; i<startlen; i++)
+    {
+        start[i] = (unsigned char)(temprand & 0xff);
+        temprand = temprand >> 8;
+    }
+
+    /* populate the central aligned block. Fail out if retry fails */
+    if (rdrand_get_n_uint64_retry(length, 10, (void *)(blockstart)) == 0) return 0;
+
+    /* populate the final misaligned block */
+    if (residual > 0)
+    {
+        if (rdrand_get_n_uint64_retry(1, 10, (void *)&temprand) == 0) return 0;
+        for (i = 0; i<residual; i++)
+        {
+            residualstart[i] = (unsigned char)(temprand & 0xff);
+            temprand = temprand >> 8;
+        }
+    }
+
+        return 1;
 }
